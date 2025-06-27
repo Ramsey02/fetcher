@@ -1,8 +1,71 @@
 import datetime
 import argparse
 import sys
+import json
+import requests
 from pathlib import Path
 from technion_fetcher_full import TechnionCourseFetcher
+
+class NoCacheTechnionCourseFetcher(TechnionCourseFetcher):
+    """Technion Course Fetcher that always fetches from API (no caching)"""
+    
+    def __init__(self, 
+                 cache_dir=None,  # Ignore cache_dir
+                 firestore_config=None,
+                 verbose=False):
+        """Initialize the course fetcher without caching"""
+        super().__init__(cache_dir=None, firestore_config=firestore_config, verbose=verbose)
+        # Force disable caching by setting cache_dir to None
+        self.cache_dir = None
+        if verbose:
+            print("🚫 Caching disabled - all requests will fetch from API")
+    
+    def _send_request(self, query, allow_empty=False):
+        """Send request to Technion SAP API WITHOUT caching"""
+        
+        if self.verbose:
+            print(f"🌐 Fetching from API (no cache): {query[:50]}...")
+        
+        url = "https://portalex.technion.ac.il/sap/opu/odata/sap/Z_CM_EV_CDIR_DATA_SRV/$batch?sap-client=700"
+        
+        data = f"""
+--batch_1d12-afbf-e3c7
+Content-Type: application/http
+Content-Transfer-Encoding: binary
+
+GET {query} HTTP/1.1
+sap-cancel-on-close: true
+X-Requested-With: X
+sap-contextid-accept: header
+Accept: application/json
+Accept-Language: he
+DataServiceVersion: 2.0
+MaxDataServiceVersion: 2.0
+
+
+--batch_1d12-afbf-e3c7--
+""".replace("\n", "\r\n")
+        
+        response = self.session.post(url, headers=self.headers, data=data, timeout=60)
+        
+        if response.status_code != 202:
+            raise RuntimeError(f"Bad status code: {response.status_code}")
+        
+        response_chunks = response.text.replace("\r\n", "\n").strip().split("\n\n")
+        if len(response_chunks) != 3:
+            raise RuntimeError(f"Invalid response format")
+        
+        json_str = response_chunks[2].split("\n", 1)[0]
+        result = json.loads(json_str)
+        
+        if not allow_empty and result == {"d": {"results": []}}:
+            raise RuntimeError("Empty response")
+        
+        # NO CACHING - just return the result directly
+        if self.verbose:
+            print(f"✅ Fresh data fetched from API")
+        
+        return result
 
 def get_current_semester():
     """Automatically determine current semester based on date"""
@@ -81,13 +144,16 @@ def save_to_firestore_university_structure(fetcher, courses, university_id, year
     
     from firebase_admin import firestore
     
-    # Sub-collection path: UniversityId/courses_year_semester/courseId
+    # FIXED: Create proper Firestore structure
+    # Collections > Documents > Sub-collections
     collection_name = f"courses_{year}_{semester}"
-    university_ref = fetcher.db.collection(university_id)
     
-    # Update university metadata first
+    # Reference the university collection
+    university_collection = fetcher.db.collection(university_id)
+    
+    # Update university metadata (this creates a document)
     semester_name = {200: "חורף", 201: "אביב", 202: "קיץ"}[semester]
-    university_ref.document('metadata').set({
+    university_collection.document('metadata').set({
         'last_updated': firestore.SERVER_TIMESTAMP,
         'available_semesters': firestore.ArrayUnion([collection_name]),
         f'semester_counts.{collection_name}': len(courses)
@@ -95,9 +161,13 @@ def save_to_firestore_university_structure(fetcher, courses, university_id, year
     
     print(f"📝 Updating {university_id} metadata...")
     
-    # Save courses to sub-collection
+    # FIXED: Create courses as a sub-collection under the university document
+    # Structure: University (collection) > data (document) > courses_YYYY_SSS (sub-collection)
+    university_doc = university_collection.document('data')
+    courses_ref = university_doc.collection(collection_name)
+    
+    # Create batch for efficient writes
     batch = fetcher.db.batch()
-    courses_ref = university_ref.collection(collection_name)
     
     for i, course in enumerate(courses):
         doc_ref = courses_ref.document(course.course_number)
@@ -142,32 +212,33 @@ def save_to_firestore_university_structure(fetcher, courses, university_id, year
         if (i + 1) % 500 == 0:
             batch.commit()
             batch = fetcher.db.batch()
-            print(f"📝 Committed batch {(i + 1) // 500} to {university_id}/{collection_name}")
+            print(f"📝 Committed batch {(i + 1) // 500} to {university_id}/data/{collection_name}")
     
     # Commit remaining documents
     if len(courses) % 500 != 0:
         batch.commit()
     
-    print(f"✅ Saved {len(courses)} courses to {university_id}/{collection_name}")
+    print(f"✅ Saved {len(courses)} courses to {university_id}/data/{collection_name}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Smart Technion Course Fetcher")
-    parser.add_argument("--cache-dir", default="./.cache", help="Cache directory")
+    parser = argparse.ArgumentParser(description="Smart Technion Course Fetcher (No Cache)")
+    parser.add_argument("--cache-dir", default="./.cache", help="Cache directory (IGNORED - no caching)")
     parser.add_argument("--firestore-config", help="Path to Firebase service account JSON")
     parser.add_argument("--output-dir", default="./data", help="Output directory for JSON files")
     parser.add_argument("--current-only", action="store_true", help="Only fetch current semester")
     parser.add_argument("--force-year", type=int, help="Force specific year")
     parser.add_argument("--force-semester", type=int, help="Force specific semester")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
+    parser.add_argument("--no-cache", action="store_true", default=True, help="Disable caching (always enabled)")
     
     args = parser.parse_args()
     
-    print("🤖 Smart Technion Course Fetcher")
+    print("🤖 Smart Technion Course Fetcher (NO CACHE)")
     print("=" * 50)
+    print("🚫 Caching is DISABLED - all data will be fetched fresh from API")
     
-    # Initialize fetcher
-    fetcher = TechnionCourseFetcher(
-        cache_dir=args.cache_dir,
+    # Initialize fetcher with NO CACHE
+    fetcher = NoCacheTechnionCourseFetcher(
         firestore_config=args.firestore_config,
         verbose=args.verbose
     )
@@ -196,7 +267,7 @@ def main():
     
     for year, semester in semesters_to_fetch:
         semester_name = {200: "Winter", 201: "Spring", 202: "Summer"}[semester]
-        print(f"\n🔍 Fetching {semester_name} {year} ({year}-{semester})")
+        print(f"\n🔍 Fetching {semester_name} {year} ({year}-{semester}) - FRESH FROM API")
         
         try:
             # Fetch courses
@@ -227,6 +298,7 @@ def main():
     print(f"\n📊 Summary:")
     print(f"✅ Successful: {successful_fetches}")
     print(f"❌ Failed: {failed_fetches}")
+    print(f"🚫 All data was fetched fresh from API (no cache used)")
     
     if failed_fetches > 0 and successful_fetches == 0:
         print("🚨 All fetches failed!")

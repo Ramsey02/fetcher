@@ -1,0 +1,65 @@
+name: Fetch Technion Courses Daily
+
+on:
+  schedule:
+    # Run daily at 2 AM UTC (5 AM Israel time)
+    - cron: '0 2 * * *'
+  
+  # Allow manual triggering from GitHub interface
+  workflow_dispatch:
+    inputs:
+      force_year:
+        description: 'Force specific year (optional)'
+        required: false
+        type: string
+      force_semester:
+        description: 'Force specific semester (200/201/202, optional)'
+        required: false
+        type: string
+
+jobs:
+  fetch-courses:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+    
+    - name: 🐍 Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+    
+    - name: 📦 Install dependencies
+      run: |
+        cd fetcher
+        pip install -r requirements.txt
+    
+    - name: 🔑 Create Firebase config
+      run: |
+        cd fetcher
+        echo '${{ secrets.FIREBASE_CONFIG }}' > firebase-config.json
+    
+    - name: 🤖 Run smart fetcher
+      run: |
+        cd fetcher
+        if [ -n "${{ github.event.inputs.force_year }}" ] && [ -n "${{ github.event.inputs.force_semester }}" ]; then
+          python smart_fetcher.py --firestore-config ./firebase-config.json --force-year ${{ github.event.inputs.force_year }} --force-semester ${{ github.event.inputs.force_semester }} --verbose
+        else
+          python smart_fetcher.py --firestore-config ./firebase-config.json --verbose
+        fi
+    
+    - name: 🧹 Clean up sensitive files
+      if: always()
+      run: |
+        cd fetcher
+        rm -f firebase-config.json
+    
+    - name: 📊 Upload logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v3
+      with:
+        name: fetcher-logs
+        path: fetcher/data/
+        retention-days: 7
