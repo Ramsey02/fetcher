@@ -33,7 +33,6 @@ jobs:
     
     - name: 📦 Install dependencies
       run: |
-        cd fetcher
         pip install -r requirements.txt
     
     - name: 🔑 Create Firebase config
