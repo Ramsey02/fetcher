@@ -155,39 +155,44 @@ def setup_university_metadata(fetcher, university_id="Technion"):
     else:
         print(f"❌ No configuration found for {university_id}")
 
-def save_to_firestore_university_structure(fetcher, courses, university_id, year, semester):
-    """Save courses to university-specific sub-collection structure"""
+def save_to_firestore_university_structure(fetcher, courses, university_id, year, semester, output_dir=None):
+    """Save courses to university-specific sub-collection structure, using existing schedule if fetched schedule is empty."""
     if not fetcher.db:
         print("❌ Firestore not initialized")
         return
-    
+
     from firebase_admin import firestore
-    
-    # FIXED: Create proper Firestore structure
-    # Collections > Documents > Sub-collections
+    import os
+
+    # Load existing data file if it exists
+    existing_schedules = {}
+    if output_dir is None:
+        output_dir = "./data"
+    data_file = os.path.join(output_dir, f"courses_{year}_{semester}.json")
+    if os.path.exists(data_file):
+        try:
+            with open(data_file, encoding="utf-8") as f:
+                existing_data = json.load(f)
+            for item in existing_data:
+                course_num = item.get("general", {}).get("מספר מקצוע")
+                schedule = item.get("schedule", [])
+                if course_num:
+                    existing_schedules[course_num] = schedule
+        except Exception as e:
+            print(f"⚠️ Failed to load existing data file: {e}")
+
     collection_name = f"courses_{year}_{semester}"
-    
-    # Reference the university collection
     university_collection = fetcher.db.collection(university_id)
-    
-    # Update university metadata (this creates a document)
     semester_name = {200: "חורף", 201: "אביב", 202: "קיץ"}[semester]
     university_collection.document('metadata').set({
         'last_updated': firestore.SERVER_TIMESTAMP,
         'available_semesters': firestore.ArrayUnion([collection_name]),
         f'semester_counts.{collection_name}': len(courses)
     }, merge=True)
-    
     print(f"📝 Updating {university_id} metadata...")
-    
-    # FIXED: Create courses as a sub-collection under the university document
-    # Structure: University (collection) > data (document) > courses_YYYY_SSS (sub-collection)
     university_doc = university_collection.document('data')
     courses_ref = university_doc.collection(collection_name)
-    
-    # Create batch for efficient writes
     batch = fetcher.db.batch()
-    
     for i, course in enumerate(courses):
         doc_ref = courses_ref.document(course.course_number)
         # Ensure schedule is a list of dicts
@@ -195,10 +200,12 @@ def save_to_firestore_university_structure(fetcher, courses, university_id, year
         if not isinstance(schedule, list):
             schedule = list(schedule)
         if schedule and isinstance(schedule[0], object) and not isinstance(schedule[0], dict):
-            # Convert objects to dicts if needed
             schedule = [vars(item) if hasattr(item, '__dict__') else item for item in schedule]
-        # Debug print
-        # print(f"Saving course {course.course_number} schedule: {schedule}")
+        # If schedule is empty, try to use existing
+        if (not schedule or len(schedule) == 0) and course.course_number in existing_schedules:
+            schedule = existing_schedules[course.course_number]
+            print(f"ℹ️ Used existing schedule for course {course.course_number}")
+        print(f"Saving course {course.course_number} schedule: {schedule}")
         course_data = {
             "general": {
                 "מספר מקצוע": course.course_number,
