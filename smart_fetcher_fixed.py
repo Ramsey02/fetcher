@@ -190,7 +190,15 @@ def save_to_firestore_university_structure(fetcher, courses, university_id, year
     
     for i, course in enumerate(courses):
         doc_ref = courses_ref.document(course.course_number)
-        
+        # Ensure schedule is a list of dicts
+        schedule = course.schedule
+        if not isinstance(schedule, list):
+            schedule = list(schedule)
+        if schedule and isinstance(schedule[0], object) and not isinstance(schedule[0], dict):
+            # Convert objects to dicts if needed
+            schedule = [vars(item) if hasattr(item, '__dict__') else item for item in schedule]
+        # Debug print
+        # print(f"Saving course {course.course_number} schedule: {schedule}")
         course_data = {
             "general": {
                 "מספר מקצוע": course.course_number,
@@ -202,7 +210,7 @@ def save_to_firestore_university_structure(fetcher, courses, university_id, year
                 "אחראים": course.responsible,
                 "הערות": course.notes,
             },
-            "schedule": course.schedule,
+            "schedule": schedule,
             "metadata": {
                 "fetched_at": firestore.SERVER_TIMESTAMP,
                 "university": university_id,
