@@ -342,12 +342,27 @@ MaxDataServiceVersion: 2.0
                 # Extract room information
                 building = ""
                 room = 0
+                building_room_dict = None
                 room_text = raw_item.get("RoomText", "")
+                
                 if room_text and room_text != "ראה פרטים":
                     room_match = re.match(r"(\d\d\d)-(\d\d\d\d)", room_text)
                     if room_match:
                         building = self.get_building_name(year, semester, raw_item.get("RoomId", ""))
                         room = int(room_match.group(2))
+                elif room_text == "ראה פרטים" or not room_text:
+                    # Try to get room information from EventScheduleSet
+                    event_id = raw_item.get("Otjid", "")
+                    if event_id:
+                        building_room_dict = self.get_room_info(year, semester, event_id)
+                        if self.verbose and building_room_dict:
+                            print(f"📍 Found room info via EventScheduleSet for {event_id}: {len(building_room_dict)} time slots")
+                else:
+                    # Try to get room info from event schedule
+                    event_schedule_id = raw_item.get("Otjid", "").replace("SM", "")
+                    room_info = self.get_room_info(year, semester, event_schedule_id)
+                    if room_info:
+                        (building, room) = list(room_info.values())[0]
                 
                 # Extract staff information
                 staff = ""
@@ -372,13 +387,35 @@ MaxDataServiceVersion: 2.0
                 day_time_entries = self._parse_schedule_text(schedule_text)
                 
                 for day, time_begin, time_end in day_time_entries:
+                    # Use building_room_dict if available (for cases where RoomText was empty or "ראה פרטים")
+                    final_building = building
+                    final_room = room
+                    
+                    if building_room_dict:
+                        # Map Hebrew day names to weekday numbers (0=Sunday in the original code)
+                        day_mapping = {
+                            "ראשון": 0,
+                            "שני": 1, 
+                            "שלישי": 2,
+                            "רביעי": 3,
+                            "חמישי": 4,
+                            "שישי": 5
+                        }
+                        weekday = day_mapping.get(day, -1)
+                        if weekday != -1:
+                            weekday_and_time = (weekday, time_begin, time_end)
+                            if weekday_and_time in building_room_dict:
+                                final_building, final_room = building_room_dict[weekday_and_time]
+                                if self.verbose:
+                                    print(f"📍 Using room info from EventScheduleSet: {final_building}-{final_room}")
+                    
                     schedule.append({
                         "קבוצה": group_id,
                         "סוג": category,
                         "יום": day,
                         "שעה": f"{time_begin} - {time_end}",
-                        "בניין": building,
-                        "חדר": room,
+                        "בניין": final_building,
+                        "חדר": final_room,
                         "מרצה/מתרגל": staff,
                         "מס.": int(raw_item["Otjid"]) if raw_item["Otjid"].isdigit() else group_id
                     })
@@ -689,7 +726,88 @@ MaxDataServiceVersion: 2.0
             self.save_to_firestore(courses, year, semester)
         
         return courses
+    
+    def get_room_info(self, year: int, semester: int, event_schedule_id: str) -> Dict[tuple, tuple]:
+        """Get room information for a specific event schedule ID"""
+        params = {
+            "sap-client": "700",
+            "$filter": (
+                f"Otjid eq '{event_schedule_id}' and Peryr eq '{year}' and Perid eq"
+                f" '{semester}'"
+            ),
+            "$expand": "Rooms",
+        }
+        
+        try:
+            raw_data = self._send_request(f"EventScheduleSet?{urllib.parse.urlencode(params)}")
+            results = raw_data["d"]["results"]
+            
+            rooms_by_time = {}
+            
+            for result in results:
+                date_raw = result.get("Evdat", "")
+                begin_raw = result.get("Beguz", "")
+                end_raw = result.get("Enduz", "")
+                
+                if not date_raw or not begin_raw or not end_raw:
+                    continue
+                
+                # Parse date
+                date = self._sap_date_parse(date_raw)
+                weekday = (date.weekday() + 1) % 7  # Convert to 0=Sunday format
+                
+                # Parse begin time
+                begin_match = re.fullmatch(r"PT(\d\d)H(\d\d)M00S", begin_raw)
+                if not begin_match:
+                    continue
+                begin_time = f"{begin_match.group(1)}:{begin_match.group(2)}"
+                
+                # Parse end time
+                end_match = re.fullmatch(r"PT(\d\d)H(\d\d)M00S", end_raw)
+                if not end_match:
+                    continue
+                end_time = f"{end_match.group(1)}:{end_match.group(2)}"
+                
+                weekday_and_time = (weekday, begin_time, end_time)
+                
+                # Process rooms
+                rooms = result.get("Rooms", {}).get("results", [])
+                
+                buildings = set()
+                room_numbers = set()
+                
+                for room in rooms:
+                    room_id = room.get("Otjid", "")
+                    room_name = room.get("Name", "")
+                    
+                    # Match room format like "123-4567"
+                    room_match = re.fullmatch(r"(\d\d\d)-(\d\d\d\d)", room_name)
+                    if room_match:
+                        building = self.get_building_name(year, semester, room_id)
+                        room_number = int(room_match.group(2))
+                        buildings.add(building)
+                        room_numbers.add(room_number)
+                
+                if len(buildings) == 1:
+                    building = buildings.pop()
+                    room_number = room_numbers.pop() if len(room_numbers) == 1 else 0
+                    rooms_by_time[weekday_and_time] = (building, room_number)
+                    
+            return rooms_by_time
+            
+        except Exception as e:
+            if self.verbose:
+                print(f"❌ Failed to get room info for {event_schedule_id}: {e}")
+            return {}
+    
+    def _sap_date_parse(self, date_str: str) -> datetime:
+        """Parse SAP date format /Date(timestamp)/"""
+        match = re.fullmatch(r"/Date\((\d+)\)/", date_str)
+        if not match:
+            raise RuntimeError(f"Invalid date: {date_str}")
+        return datetime.fromtimestamp(int(match.group(1)) / 1000, timezone.utc)
 
+    # ...existing code...
 def main():
     parser = argparse.ArgumentParser(description="Technion Course Fetcher with Full Schedule Support")
     parser.add_argument("--year", type=int, help="Academic year (e.g., 2024)")

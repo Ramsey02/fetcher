@@ -16,7 +16,8 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 
-
+# how to run e.g. python smart_fetcher_fixed.py --firestore-config ./firebase-config.json --output-dir ./data --current-only --verbose
+#  or python smart_fetcher_fixed.py --firestore-config ./firebase-config.json --force-year 2024 --force-semester 201 --verbose
 import datetime
 import argparse
 import sys
