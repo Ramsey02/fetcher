@@ -46,8 +46,8 @@ jobs:
         if [ -n "${{ github.event.inputs.force_year }}" ] && [ -n "${{ github.event.inputs.force_semester }}" ]; then
           python smart_fetcher_fixed.py --firestore-config ./firebase-config.json --force-year ${{ github.event.inputs.force_year }} --force-semester ${{ github.event.inputs.force_semester }} --verbose
         else
-          python smart_fetcher_fixed.py --firestore-config ./firebase-config.json --force-year 2024 --force-semester 201 --verbose
           python smart_fetcher_fixed.py --firestore-config ./firebase-config.json --force-year 2024 --force-semester 202 --verbose
+          python smart_fetcher_fixed.py --firestore-config ./firebase-config.json --force-year 2025 --force-semester 200 --verbose
         fi
     
     - name: 🧹 Clean up sensitive files
